@@ -1,1 +1,14 @@
-gradio>=4.0.0
+# Core dependencies
+jericho
+python-dotenv
+
+# LLM providers
+huggingface_hub
+openai
+anthropic
+
+# MCP Server
+fastmcp
+
+# Function calling (optional, for the alternative approach)
+langchain-core

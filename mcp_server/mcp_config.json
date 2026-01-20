@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "zork": {
+      "command": "python",
+      "args": ["mcp_server/zork_server.py"],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}
