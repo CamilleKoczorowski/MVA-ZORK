@@ -1,9 +1,12 @@
 # Core dependencies
 jericho
 python-dotenv
+spacy
 
 # MCP Server
 fastmcp
 
 # Function calling (optional, for the alternative approach)
 langchain-core
+
+huggingface_hub

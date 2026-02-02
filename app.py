@@ -49,16 +49,22 @@ Get your HuggingFace token at: https://huggingface.co/settings/tokens
 
 ### 4. Explore the Templates
 
-The templates are in the `templates/` folder:
+The submission template is in the `submission_template/` folder:
 
-- `mcp_server_template.py` - MCP server starter code
-- `react_agent_template.py` - ReAct agent starter code
+- `agent.py` - Your agent implementation (implement the StudentAgent class)
+- `mcp_server.py` - Your MCP server implementation (add tools)
+- `README.md` - Detailed instructions
+
+A working example is in `examples/mcp_react/`.
 
 ### 5. Test Your Implementation
 
 ```bash
-# Run your agent
-python run_agent.py --mode mcp -n 20
+# Run the example agent
+python run_agent.py
+
+# Run with a different game
+python run_agent.py --game advent
 
 # List available games (57 total!)
 python run_agent.py --list-games
@@ -66,7 +72,7 @@ python run_agent.py --list-games
 
 ## Resources
 
-- [Assignment Instructions](templates/README.md)
+- [Submission Instructions](submission_template/README.md)
 - [FastMCP Documentation](https://gofastmcp.com/)
 - [MCP Protocol](https://modelcontextprotocol.io/)
 """

@@ -1,5 +1,5 @@
-master.zip
 .github/
+hidden_submission/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -140,12 +140,8 @@ dmypy.json
 *.swo
 *~
 
-# Game files
-z-machine-games-master/
-*.z3
-*.z4
-*.z5
-*.z8
-
 # Temp files
 .mcp_config_temp.json
+
+# Z-machine game files
+z-machine-games-master/

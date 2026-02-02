@@ -1,0 +1,8 @@
+# Core dependencies (provided by course infrastructure)
+# jericho
+# python-dotenv
+# fastmcp
+# huggingface_hub
+
+# Required for HF Space
+gradio

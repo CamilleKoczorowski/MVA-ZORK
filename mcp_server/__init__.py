@@ -1,1 +1,0 @@
-# Text Adventure MCP Server
