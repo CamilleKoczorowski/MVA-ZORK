@@ -4,11 +4,12 @@ emoji: 🎮
 colorFrom: green
 colorTo: purple
 sdk: gradio
-sdk_version: 6.3.0
+sdk_version: 6.5.1
 app_file: app.py
-pinned: false
+pinned: true
 license: mit
 hf_oauth: true
+short_description: 'Third assignment: Playing Zork has never been so boring!'
 ---
 
 # Text Adventure LLM Agent Project
