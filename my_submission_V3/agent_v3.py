@@ -99,6 +99,10 @@ def generate_reflexion(history: list[str], seed: int) -> str:
         return note
     except Exception:
         return ""
+
+
+@dataclass
+class RunResult:
     """Result of running the agent. Do not modify this class."""
     final_score: int
     max_score: int
@@ -151,11 +155,13 @@ EXPLORATION STRATEGY:
 - Examine every interesting object mentioned in the description
 
 AVAILABLE TOOLS:
-- play_action : execute a game command
-- memory      : get state summary (score, failed actions, recent history)
-- get_map     : see explored locations and connections
-- inventory   : check what you carry
-- get_location: get current location name"""
+- play_action    : execute a game command
+- memory         : get state summary (score, failed actions, recent history)
+- get_map        : see explored locations and connections
+- inventory      : check what you carry
+- get_location   : get current location name
+- suggest_actions: get prioritized list of untried directions and objects to examine
+                   USE THIS when stagnating or unsure what to do next"""
 
 
 # =============================================================================
@@ -194,6 +200,8 @@ class AgentMemory:
         self._no_score_change_steps: int = 0
         # Reflexion: accumulated self-reflection notes (one per 5-step interval)
         self.reflexion_notes: list[str] = []
+        # Last suggest_actions output (refreshed every 10 steps when stagnating)
+        self._last_suggestions: str = ""
 
     # Phrases that indicate an action failed, even if obs text changed
     FAILURE_PHRASES = [
@@ -363,6 +371,18 @@ class StudentAgent:
                     self.memory.reflexion_notes.append(note)
                     if verbose:
                         print(f"\n[REFLEXION step {step}] {note}")
+
+            # ── Call suggest_actions when stagnating (every 10 steps without score) ──
+            has_suggest = "suggest_actions" in tool_names
+            if has_suggest and self.memory.is_stagnant(threshold=10) and step % 10 == 0:
+                try:
+                    sug_result = await client.call_tool("suggest_actions", {})
+                    sug_text = self._extract_result(sug_result)
+                    self.memory._last_suggestions = sug_text
+                    if verbose:
+                        print(f"\n[SUGGEST step {step}]\n{sug_text}")
+                except Exception:
+                    pass
             # ─────────────────────────────────────────────────────────────────
 
             memory_ctx = self.memory.get_context_string(location)
@@ -452,12 +472,16 @@ class StudentAgent:
                 f"Any of the above = wasted move. Choose something else."
             )
 
-        # 2. Reflexion notes (accumulated self-reflections every 5 steps)
+        # 2. Suggestions from suggest_actions (when stagnating)
+        if self.memory._last_suggestions:
+            parts.append(f"SUGGESTED NEXT ACTIONS:\n{self.memory._last_suggestions}")
+
+        # 3. Reflexion notes
         if self.memory.reflexion_notes:
             notes_str = "\n".join(f"  [{i+1}] {n}" for i, n in enumerate(self.memory.reflexion_notes[-3:]))
             parts.append(f"LESSONS LEARNED (from self-reflection):\n{notes_str}")
 
-        # 3. Cycle / stagnation warnings
+        # 4. Cycle / stagnation warnings
         if self.memory.is_cycling():
             parts.append("WARNING CYCLE: You keep repeating the same actions. Pick a completely different approach.")
         if self.memory.is_stagnant(threshold=12):
