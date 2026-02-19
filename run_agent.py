@@ -200,9 +200,19 @@ Examples:
     print(f"Max Steps: {args.max_steps}")
     print(f"Verbose: {args.verbose}")
 
-    # Run the agent
+# Run the agent
     try:
         results = asyncio.run(run_mcp_agent(args))
+
+        # Affichage résumé
+        if results:
+            print(f"\n{'='*50}")
+            print(f"Score final : {results.final_score}")
+            print(f"Moves       : {results.moves}")
+            locs = sorted(results.locations_visited)
+            print(f"Locations ({len(locs)}):")
+            for loc in locs:
+                print(f"  - {loc}")
 
     except FileNotFoundError as e:
         print(f"\n[Error] {e}")
@@ -220,7 +230,6 @@ Examples:
         sys.exit(1)
 
     return results
-
 
 if __name__ == "__main__":
     main()
