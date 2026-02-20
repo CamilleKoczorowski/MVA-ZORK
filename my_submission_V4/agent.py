@@ -202,8 +202,8 @@ class AgentMemory:
         # V4: track which locations have been "swept" (all dirs tried)
         self._first_visit_done: set[str] = set()
 
-    def update(self, location: str, new_location: str, action: str, obs_before: str, obs_after: str,
-               score_before: int, score_after: int):
+    def update(self, location: str, new_location: str, action: str, obs_before: str,
+               obs_after: str, score_before: int, score_after: int):
         self.visited_locations.add(location)
         self.action_history.append(action)
         self.score_history.append(score_after)
@@ -213,9 +213,8 @@ class AgentMemory:
         obs_changed = obs_before.strip() != obs_after.strip()
         obs_lower = obs_after.lower()
         is_failure_phrase = any(p in obs_lower for p in self.FAILURE_PHRASES)
-        # Correct location_changed: compare actual Jericho locations
+        # Correct fix: use actual location change from Jericho/text fallback
         location_changed = (new_location != location)
-        # An action fails only if obs + score + location are ALL unchanged
         is_failed = is_failure_phrase or (not obs_changed and not score_changed and not location_changed)
 
         if is_failed:
@@ -295,12 +294,12 @@ class StudentAgent:
         self._max_score: int = 0
         # V4: BFS autopilot state
         self._autopilot_queue: deque[str] = deque()
-        # V4fix: count consecutive navigate_to_frontier calls with no path found
+        # count consecutive navigate_to_frontier calls with no path found
         self._navigate_fail_count: int = 0
-        # Fix: track last location to reset fail counter on location change
-        self._last_known_location: str = "Unknown"
-        # Unknown zone sweep: systematic direction index when stuck in Unknown
+        # Unknown zone sweep: systematic direction index + cooldown
         self._unknown_sweep_idx: int = 0
+        self._unknown_tried_dirs: set[str] = set()   # dirs tried under Unknown key
+        self._sweep_cooldown: int = 0                 # steps to wait before next sweep
 
     async def run(
         self,
@@ -337,97 +336,102 @@ class StudentAgent:
         for step in range(1, max_steps + 1):
 
             # ── BFS Autopilot ────────────────────────────────────────────────
-            # If we have a queued path, execute next step mechanically
             if self._autopilot_queue:
                 direction = self._autopilot_queue.popleft()
                 if verbose:
                     print(f"\n--- Step {step} [AUTOPILOT] ---")
                     print(f"DIRECTION: {direction} ({len(self._autopilot_queue)} remaining)")
-
                 try:
                     result = await client.call_tool("play_action", {"action": direction})
                     new_obs = self._extract_result(result)
                 except Exception as e:
                     new_obs = f"Error: {e}"
-                    self._autopilot_queue.clear()  # abort path on error
-
+                    self._autopilot_queue.clear()
                 if verbose:
                     print(f"OBS: {new_obs[:200]}")
-
                 new_score = self._parse_score(new_obs) or self._last_score
                 new_location = await self._get_location(client, has_get_location, new_obs)
-                self.memory.update(
-                    location=location,
-                    new_location=new_location,
-                    action=direction,
-                    obs_before=self._last_obs,
-                    obs_after=new_obs,
-                    score_before=self._last_score,
-                    score_after=new_score,
-                )
+                self.memory.update(location=location, new_location=new_location,
+                                   action=direction, obs_before=self._last_obs,
+                                   obs_after=new_obs, score_before=self._last_score,
+                                   score_after=new_score)
                 moves += 1
-
                 if new_location != location:
                     self.memory.visited_locations.add(new_location)
-                    # Reset fail counter when we actually move to a new location
                     if new_location != "Unknown":
                         self._navigate_fail_count = 0
                 location = new_location
-
                 self._last_obs = new_obs
                 self._last_score = new_score
                 observation = new_obs
                 self.memory.current_location = location
                 history.append(("AUTOPILOT", direction, new_obs[:100]))
-
                 if self._is_game_over(new_obs):
                     break
                 continue
             # ─────────────────────────────────────────────────────────────────
 
-            # ── Unknown Zone Escape ──────────────────────────────────────────
-            # When stuck in Unknown for many steps, do a systematic direction sweep
-            # ignoring failed_actions (which may be corrupted under "Unknown" key)
+            # ── Unknown Zone Escape (one direction per entry, with cooldown) ──
+            # When Jericho can't name the current room, do a systematic sweep:
+            # - Try each of 12 directions ONCE (skip already-tried under Unknown)
+            # - After a full cycle (all 12 tried), set cooldown=20 steps before retrying
             SWEEP_DIRS = ["south","north","east","west","up","down","enter","exit",
                           "northeast","northwest","southeast","southwest"]
+            if self._sweep_cooldown > 0:
+                self._sweep_cooldown -= 1
+
             if (location == "Unknown"
-                    and self.memory.is_stagnant(threshold=8)
+                    and self.memory.is_stagnant(threshold=5)
+                    and self._sweep_cooldown == 0
                     and not self._autopilot_queue):
-                sweep_dir = SWEEP_DIRS[self._unknown_sweep_idx % len(SWEEP_DIRS)]
-                self._unknown_sweep_idx += 1
-                if verbose:
-                    print(f"\n--- Step {step} [UNKNOWN SWEEP #{self._unknown_sweep_idx}] direction={sweep_dir} ---")
-                try:
-                    result = await client.call_tool("play_action", {"action": sweep_dir})
-                    new_obs = self._extract_result(result)
-                except Exception as e:
-                    new_obs = f"Error: {e}"
-                new_score = self._parse_score(new_obs) or self._last_score
-                new_location = await self._get_location(client, has_get_location, new_obs)
-                self.memory.update(
-                    location=location,
-                    new_location=new_location,
-                    action=sweep_dir,
-                    obs_before=self._last_obs,
-                    obs_after=new_obs,
-                    score_before=self._last_score,
-                    score_after=new_score,
-                )
-                moves += 1
-                if new_location != location:
-                    self.memory.visited_locations.add(new_location)
-                    if new_location != "Unknown":
-                        self._navigate_fail_count = 0
-                location = new_location
-                self._last_obs = new_obs
-                self._last_score = new_score
-                observation = new_obs
-                self.memory.current_location = location
-                history.append(("SWEEP", sweep_dir, new_obs[:100]))
-                if self._is_game_over(new_obs):
-                    break
-                continue
+                # Find next untried direction
+                sweep_dir = None
+                for d in SWEEP_DIRS:
+                    if d not in self._unknown_tried_dirs:
+                        sweep_dir = d
+                        break
+
+                if sweep_dir is None:
+                    # Full cycle complete — reset and apply cooldown
+                    self._unknown_tried_dirs.clear()
+                    self._sweep_cooldown = 20
+                    if verbose:
+                        print(f"\n--- Step {step} [SWEEP COMPLETE — cooldown 20 steps] ---")
+                else:
+                    self._unknown_tried_dirs.add(sweep_dir)
+                    self._unknown_sweep_idx += 1
+                    if verbose:
+                        print(f"\n--- Step {step} [UNKNOWN SWEEP #{self._unknown_sweep_idx}] direction={sweep_dir} ---")
+                    try:
+                        result = await client.call_tool("play_action", {"action": sweep_dir})
+                        new_obs = self._extract_result(result)
+                    except Exception as e:
+                        new_obs = f"Error: {e}"
+                    new_score = self._parse_score(new_obs) or self._last_score
+                    new_location = await self._get_location(client, has_get_location, new_obs)
+                    self.memory.update(location=location, new_location=new_location,
+                                       action=sweep_dir, obs_before=self._last_obs,
+                                       obs_after=new_obs, score_before=self._last_score,
+                                       score_after=new_score)
+                    moves += 1
+                    if new_location != location:
+                        self.memory.visited_locations.add(new_location)
+                        if new_location != "Unknown":
+                            self._navigate_fail_count = 0
+                            self._unknown_tried_dirs.clear()  # reset sweep on exit
+                            self._sweep_cooldown = 0
+                    location = new_location
+                    self._last_obs = new_obs
+                    self._last_score = new_score
+                    observation = new_obs
+                    self.memory.current_location = location
+                    history.append(("SWEEP", sweep_dir, new_obs[:100]))
+                    if self._is_game_over(new_obs):
+                        break
+                    continue
             # ─────────────────────────────────────────────────────────────────
+
+            # ── Reflexion every 5 steps ──────────────────────────────────────
             if step > 1 and step % 5 == 0 and self.memory.action_history:
                 note = generate_reflexion(self.memory.action_history, seed=seed + step)
                 if note:
@@ -499,15 +503,10 @@ class StudentAgent:
                         new_obs = self._extract_result(result2)
                         new_score = self._parse_score(new_obs) or self._last_score
                         new_location = await self._get_location(client, has_get_location, new_obs)
-                        self.memory.update(
-                            location=location,
-                            new_location=new_location,
-                            action=fallback,
-                            obs_before=self._last_obs,
-                            obs_after=new_obs,
-                            score_before=self._last_score,
-                            score_after=new_score,
-                        )
+                        self.memory.update(location=location, new_location=new_location,
+                                           action=fallback, obs_before=self._last_obs,
+                                           obs_after=new_obs, score_before=self._last_score,
+                                           score_after=new_score)
                         moves += 1
                         if new_location != location:
                             self.memory.visited_locations.add(new_location)
@@ -540,17 +539,11 @@ class StudentAgent:
             if tool_name == "play_action":
                 action = tool_args.get("action", "look")
                 new_location = await self._get_location(client, has_get_location, new_obs)
-                self.memory.update(
-                    location=location,
-                    new_location=new_location,
-                    action=action.lower(),
-                    obs_before=self._last_obs,
-                    obs_after=new_obs,
-                    score_before=self._last_score,
-                    score_after=new_score,
-                )
+                self.memory.update(location=location, new_location=new_location,
+                                   action=action.lower(), obs_before=self._last_obs,
+                                   obs_after=new_obs, score_before=self._last_score,
+                                   score_after=new_score)
                 moves += 1
-
                 if new_location != location:
                     self.memory.visited_locations.add(new_location)
                     if new_location != "Unknown":
