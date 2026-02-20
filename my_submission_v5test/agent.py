@@ -278,6 +278,7 @@ INVALID_VERBS = {
     "investigate": "examine",
     "get": "take",
     "go": "north",  # "go north" → "north"
+    "hit": "attack", "kill": "attack", "read leaflet": "read", "run": "north",
 }
 
 
@@ -360,13 +361,21 @@ class StudentAgent:
                         self._navigate_fail_count = 0
                         self._bfs_repeat_count = 0
                         self._last_bfs_path = []
+                # Dans agent_V5.py
                 location = new_location
-                # Abort remaining path if we landed in Unknown (BFS node unreliable)
-                if location == "Unknown" and self._autopilot_queue:
+                # Abort remaining path if we landed in Unknown OR if action had no effect
+                if (location == "Unknown" or "[No effect" in new_obs) and self._autopilot_queue:
                     if verbose:
-                        print(f"[AUTOPILOT] Unknown destination — aborting remaining path")
+                        print(f"[AUTOPILOT] Obstacle or Unknown destination — aborting remaining path")
                     self._autopilot_queue.clear()
-                    self._bfs_repeat_count += 1  # count this as a repeat failure
+                    self._bfs_repeat_count += 1
+                #location = new_location
+                ## Abort remaining path if we landed in Unknown (BFS node unreliable)
+                #if location == "Unknown" and self._autopilot_queue:
+                #    if verbose:
+                #        print(f"[AUTOPILOT] Unknown destination — aborting remaining path")
+                #    self._autopilot_queue.clear()
+                #    self._bfs_repeat_count += 1  # count this as a repeat failure
                 self._last_obs = new_obs
                 self._last_score = new_score
                 observation = new_obs

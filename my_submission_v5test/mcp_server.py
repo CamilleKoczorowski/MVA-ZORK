@@ -69,9 +69,10 @@ class GameState:
         """
         # Keywords that appear in error/game messages but NOT in room titles
         MESSAGE_INDICATORS = [
-            "grunk", "you ", "there ", "that ", "it ", "ok,", "oof",
-            "already", "can't", "not ", "only ", "pig ", "just ",
+            "you ", "there ", "that ", "it ", "ok,", "oof",
+            "already", "can't", "not ", "only ", "just ",
             "have", "hear", "look ", "see ", "but ", "this ",
+            "nothing", "don't", "doesn't", "won't",
         ]
         for line in obs.strip().split("\n"):
             line = line.strip()
@@ -123,7 +124,10 @@ class GameState:
             "n","s","e","w","u","d","ne","nw","se","sw",
             "northeast","northwest","southeast","southwest",
         }
-        if action.lower().strip() in DIRECTIONS and location_changed:
+        # Only record transitions between two known (non-Unknown) locations
+        if (action.lower().strip() in DIRECTIONS and location_changed
+                and not prev_location.startswith("Unknown")
+                and not new_location.startswith("Unknown")):
             self.location_graph[prev_location][action.lower().strip()] = new_location
 
         self.previous_location = prev_location
