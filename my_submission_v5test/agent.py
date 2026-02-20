@@ -213,8 +213,8 @@ class AgentMemory:
         obs_changed = obs_before.strip() != obs_after.strip()
         obs_lower = obs_after.lower()
         is_failure_phrase = any(p in obs_lower for p in self.FAILURE_PHRASES)
-        # Correct fix: use actual location change from Jericho/text fallback
         location_changed = (new_location != location)
+        # Action is failed only if obs, score AND location are all unchanged
         is_failed = is_failure_phrase or (not obs_changed and not score_changed and not location_changed)
 
         if is_failed:
@@ -294,11 +294,10 @@ class StudentAgent:
         self._max_score: int = 0
         # V4: BFS autopilot state
         self._autopilot_queue: deque[str] = deque()
-        # count consecutive navigate_to_frontier calls with no path found
         self._navigate_fail_count: int = 0
-        # Track last BFS path to detect oscillation
+        # BFS deadlock detection: same path returned repeatedly → abort
         self._last_bfs_path: list[str] = []
-        self._last_bfs_target: str = ""
+        self._bfs_repeat_count: int = 0
 
     async def run(
         self,
@@ -359,7 +358,15 @@ class StudentAgent:
                     self.memory.visited_locations.add(new_location)
                     if new_location != "Unknown":
                         self._navigate_fail_count = 0
+                        self._bfs_repeat_count = 0
+                        self._last_bfs_path = []
                 location = new_location
+                # Abort remaining path if we landed in Unknown (BFS node unreliable)
+                if location == "Unknown" and self._autopilot_queue:
+                    if verbose:
+                        print(f"[AUTOPILOT] Unknown destination — aborting remaining path")
+                    self._autopilot_queue.clear()
+                    self._bfs_repeat_count += 1  # count this as a repeat failure
                 self._last_obs = new_obs
                 self._last_score = new_score
                 observation = new_obs
@@ -379,25 +386,21 @@ class StudentAgent:
                         print(f"\n[REFLEXION step {step}] {note}")
 
             # ── Trigger BFS autopilot when stagnant ──────────────────────────
-            if has_navigate and self.memory.is_stagnant(threshold=15) and not self._autopilot_queue:
+            # Guard: only from named rooms AND BFS hasn't deadlocked on same path
+            if (has_navigate
+                    and location != "Unknown"
+                    and self.memory.is_stagnant(threshold=15)
+                    and self._bfs_repeat_count < 2
+                    and not self._autopilot_queue):
                 try:
                     nav_result = await client.call_tool("navigate_to_frontier", {})
                     nav_text = self._extract_result(nav_result)
                     path = self._parse_frontier_path(nav_text)
                     if path:
-                        # Anti-oscillation: if same path as last time, the frontier
-                        # is a dead end — mark it visited and skip
-                        if path == self._last_bfs_path:
-                            self._navigate_fail_count += 1
-                            if verbose:
-                                print(f"[BFS] Oscillation detected (same path #{self._navigate_fail_count}), skipping")
-                        else:
-                            self._autopilot_queue.extend(path)
-                            self._last_bfs_path = path
-                            self._navigate_fail_count = 0
-                            if verbose:
-                                print(f"\n[BFS AUTOPILOT step {step}] Path: {path}")
-                            continue  # start autopilot immediately
+                        self._autopilot_queue.extend(path)
+                        if verbose:
+                            print(f"\n[BFS AUTOPILOT step {step}] Path: {path}")
+                        continue
                 except Exception as e:
                     if verbose:
                         print(f"\n[BFS] Error: {e}")
@@ -431,40 +434,55 @@ class StudentAgent:
 
             # Special: if LLM calls navigate_to_frontier, load autopilot queue
             if tool_name == "navigate_to_frontier":
+                # Generic deadlock guard: refuse BFS from Unknown OR if same path repeating
+                if location == "Unknown" or self._bfs_repeat_count >= 2:
+                    if verbose:
+                        print(f"[BFS] Blocked (location={location}, repeat={self._bfs_repeat_count}) → forcing play_action")
+                    self._navigate_fail_count += 1
+                    fallback = self._find_alternative_action(location)
+                    result2 = await client.call_tool("play_action", {"action": fallback})
+                    new_obs = self._extract_result(result2)
+                    new_score = self._parse_score(new_obs) or self._last_score
+                    new_location = await self._get_location(client, has_get_location, new_obs)
+                    self.memory.update(location=location, new_location=new_location,
+                                       action=fallback, obs_before=self._last_obs,
+                                       obs_after=new_obs, score_before=self._last_score,
+                                       score_after=new_score)
+                    moves += 1
+                    if new_location != location:
+                        self.memory.visited_locations.add(new_location)
+                        if new_location != "Unknown":
+                            self._navigate_fail_count = 0
+                            self._bfs_repeat_count = 0
+                            self._last_bfs_path = []
+                    location = new_location
+                    self._last_obs = new_obs
+                    self._last_score = new_score
+                    observation = new_obs
+                    self.memory.current_location = location
+                    history.append((thought, "navigate_to_frontier→fallback", new_obs[:100]))
+                    self.recent_tool_sequence.append("navigate_to_frontier")
+                    continue
+
                 try:
                     result = await client.call_tool("navigate_to_frontier", {})
                     nav_text = self._extract_result(result)
                     path = self._parse_frontier_path(nav_text)
                     if path:
+                        # BFS repeat detection: same path as last time?
                         if path == self._last_bfs_path:
-                            self._navigate_fail_count += 1
-                            if verbose:
-                                print(f"[BFS] Oscillation (same path), forcing play_action")
-                            fallback = self._find_alternative_action(location)
-                            result2 = await client.call_tool("play_action", {"action": fallback})
-                            new_obs = self._extract_result(result2)
-                            new_score = self._parse_score(new_obs) or self._last_score
-                            new_location = await self._get_location(client, has_get_location, new_obs)
-                            self.memory.update(location=location, new_location=new_location,
-                                               action=fallback, obs_before=self._last_obs,
-                                               obs_after=new_obs, score_before=self._last_score,
-                                               score_after=new_score)
-                            moves += 1
-                            if new_location != location:
-                                self.memory.visited_locations.add(new_location)
-                                self._navigate_fail_count = 0
-                            location = new_location
-                            self._last_score = new_score
+                            self._bfs_repeat_count += 1
                         else:
-                            self._autopilot_queue.extend(path)
-                            self._last_bfs_path = path
-                            self._navigate_fail_count = 0  # reset on success
-                            if verbose:
-                                print(f"[BFS] Loaded path: {path}")
-                            new_obs = nav_text
+                            self._bfs_repeat_count = 0
+                            self._last_bfs_path = path[:]
+                        self._autopilot_queue.extend(path)
+                        self._navigate_fail_count = 0
+                        if verbose:
+                            print(f"[BFS] Loaded path: {path} (repeat={self._bfs_repeat_count})")
+                        new_obs = nav_text
                     else:
-                        # NO FRONTIER FOUND — force a play_action instead
                         self._navigate_fail_count += 1
+                        self._bfs_repeat_count += 1
                         if verbose:
                             print(f"[BFS] No frontier (fail #{self._navigate_fail_count}), forcing play_action")
                         fallback = self._find_alternative_action(location)
@@ -481,12 +499,15 @@ class StudentAgent:
                             self.memory.visited_locations.add(new_location)
                             if new_location != "Unknown":
                                 self._navigate_fail_count = 0
+                                self._bfs_repeat_count = 0
+                                self._last_bfs_path = []
                         location = new_location
                         self._last_score = new_score
                 except Exception as e:
                     new_obs = f"navigate_to_frontier error: {e}"
                 self._last_obs = new_obs
                 observation = new_obs
+                self.memory.current_location = location
                 history.append((thought, "navigate_to_frontier", new_obs[:100]))
                 self.recent_tool_sequence.append(tool_name)
                 continue
@@ -517,6 +538,8 @@ class StudentAgent:
                     self.memory.visited_locations.add(new_location)
                     if new_location != "Unknown":
                         self._navigate_fail_count = 0
+                        self._bfs_repeat_count = 0
+                        self._last_bfs_path = []
                 location = new_location
 
             self._last_obs = new_obs
