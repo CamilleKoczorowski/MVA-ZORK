@@ -202,7 +202,7 @@ class AgentMemory:
         # V4: track which locations have been "swept" (all dirs tried)
         self._first_visit_done: set[str] = set()
 
-    def update(self, location: str, action: str, obs_before: str, obs_after: str,
+    def update(self, location: str, new_location: str, action: str, obs_before: str, obs_after: str,
                score_before: int, score_after: int):
         self.visited_locations.add(location)
         self.action_history.append(action)
@@ -213,7 +213,10 @@ class AgentMemory:
         obs_changed = obs_before.strip() != obs_after.strip()
         obs_lower = obs_after.lower()
         is_failure_phrase = any(p in obs_lower for p in self.FAILURE_PHRASES)
-        is_failed = is_failure_phrase or (not obs_changed and not score_changed)
+        # Correct location_changed: compare actual Jericho locations
+        location_changed = (new_location != location)
+        # An action fails only if obs + score + location are ALL unchanged
+        is_failed = is_failure_phrase or (not obs_changed and not score_changed and not location_changed)
 
         if is_failed:
             self.failed_actions[location].add(action.lower())
@@ -225,7 +228,7 @@ class AgentMemory:
         else:
             self._no_score_change_steps = 0
 
-        self.current_location = location
+        self.current_location = new_location
 
     def is_action_failed(self, location: str, action: str) -> bool:
         return action.lower().strip() in self.failed_actions.get(location, set())
@@ -292,6 +295,12 @@ class StudentAgent:
         self._max_score: int = 0
         # V4: BFS autopilot state
         self._autopilot_queue: deque[str] = deque()
+        # V4fix: count consecutive navigate_to_frontier calls with no path found
+        self._navigate_fail_count: int = 0
+        # Fix: track last location to reset fail counter on location change
+        self._last_known_location: str = "Unknown"
+        # Unknown zone sweep: systematic direction index when stuck in Unknown
+        self._unknown_sweep_idx: int = 0
 
     async def run(
         self,
@@ -346,8 +355,10 @@ class StudentAgent:
                     print(f"OBS: {new_obs[:200]}")
 
                 new_score = self._parse_score(new_obs) or self._last_score
+                new_location = await self._get_location(client, has_get_location, new_obs)
                 self.memory.update(
                     location=location,
+                    new_location=new_location,
                     action=direction,
                     obs_before=self._last_obs,
                     obs_after=new_obs,
@@ -356,9 +367,11 @@ class StudentAgent:
                 )
                 moves += 1
 
-                new_location = await self._get_location(client, has_get_location, new_obs)
                 if new_location != location:
                     self.memory.visited_locations.add(new_location)
+                    # Reset fail counter when we actually move to a new location
+                    if new_location != "Unknown":
+                        self._navigate_fail_count = 0
                 location = new_location
 
                 self._last_obs = new_obs
@@ -372,7 +385,49 @@ class StudentAgent:
                 continue
             # ─────────────────────────────────────────────────────────────────
 
-            # ── Reflexion every 5 steps ──────────────────────────────────────
+            # ── Unknown Zone Escape ──────────────────────────────────────────
+            # When stuck in Unknown for many steps, do a systematic direction sweep
+            # ignoring failed_actions (which may be corrupted under "Unknown" key)
+            SWEEP_DIRS = ["south","north","east","west","up","down","enter","exit",
+                          "northeast","northwest","southeast","southwest"]
+            if (location == "Unknown"
+                    and self.memory.is_stagnant(threshold=8)
+                    and not self._autopilot_queue):
+                sweep_dir = SWEEP_DIRS[self._unknown_sweep_idx % len(SWEEP_DIRS)]
+                self._unknown_sweep_idx += 1
+                if verbose:
+                    print(f"\n--- Step {step} [UNKNOWN SWEEP #{self._unknown_sweep_idx}] direction={sweep_dir} ---")
+                try:
+                    result = await client.call_tool("play_action", {"action": sweep_dir})
+                    new_obs = self._extract_result(result)
+                except Exception as e:
+                    new_obs = f"Error: {e}"
+                new_score = self._parse_score(new_obs) or self._last_score
+                new_location = await self._get_location(client, has_get_location, new_obs)
+                self.memory.update(
+                    location=location,
+                    new_location=new_location,
+                    action=sweep_dir,
+                    obs_before=self._last_obs,
+                    obs_after=new_obs,
+                    score_before=self._last_score,
+                    score_after=new_score,
+                )
+                moves += 1
+                if new_location != location:
+                    self.memory.visited_locations.add(new_location)
+                    if new_location != "Unknown":
+                        self._navigate_fail_count = 0
+                location = new_location
+                self._last_obs = new_obs
+                self._last_score = new_score
+                observation = new_obs
+                self.memory.current_location = location
+                history.append(("SWEEP", sweep_dir, new_obs[:100]))
+                if self._is_game_over(new_obs):
+                    break
+                continue
+            # ─────────────────────────────────────────────────────────────────
             if step > 1 and step % 5 == 0 and self.memory.action_history:
                 note = generate_reflexion(self.memory.action_history, seed=seed + step)
                 if note:
@@ -430,9 +485,36 @@ class StudentAgent:
                     path = self._parse_frontier_path(nav_text)
                     if path:
                         self._autopilot_queue.extend(path)
+                        self._navigate_fail_count = 0  # reset on success
                         if verbose:
                             print(f"[BFS] Loaded path: {path}")
-                    new_obs = nav_text
+                        new_obs = nav_text
+                    else:
+                        # NO FRONTIER FOUND — force a play_action instead
+                        self._navigate_fail_count += 1
+                        if verbose:
+                            print(f"[BFS] No frontier (fail #{self._navigate_fail_count}), forcing play_action")
+                        fallback = self._find_alternative_action(location)
+                        result2 = await client.call_tool("play_action", {"action": fallback})
+                        new_obs = self._extract_result(result2)
+                        new_score = self._parse_score(new_obs) or self._last_score
+                        new_location = await self._get_location(client, has_get_location, new_obs)
+                        self.memory.update(
+                            location=location,
+                            new_location=new_location,
+                            action=fallback,
+                            obs_before=self._last_obs,
+                            obs_after=new_obs,
+                            score_before=self._last_score,
+                            score_after=new_score,
+                        )
+                        moves += 1
+                        if new_location != location:
+                            self.memory.visited_locations.add(new_location)
+                            if new_location != "Unknown":
+                                self._navigate_fail_count = 0
+                        location = new_location
+                        self._last_score = new_score
                 except Exception as e:
                     new_obs = f"navigate_to_frontier error: {e}"
                 self._last_obs = new_obs
@@ -457,8 +539,10 @@ class StudentAgent:
 
             if tool_name == "play_action":
                 action = tool_args.get("action", "look")
+                new_location = await self._get_location(client, has_get_location, new_obs)
                 self.memory.update(
                     location=location,
+                    new_location=new_location,
                     action=action.lower(),
                     obs_before=self._last_obs,
                     obs_after=new_obs,
@@ -467,9 +551,10 @@ class StudentAgent:
                 )
                 moves += 1
 
-                new_location = await self._get_location(client, has_get_location, new_obs)
                 if new_location != location:
                     self.memory.visited_locations.add(new_location)
+                    if new_location != "Unknown":
+                        self._navigate_fail_count = 0
                 location = new_location
 
             self._last_obs = new_obs
@@ -607,6 +692,11 @@ class StudentAgent:
         if tool_name not in valid_tools:
             tool_name = TOOL_ALIASES.get(tool_name, "play_action")
 
+        # If BFS keeps failing (no frontier found), force play_action instead
+        if tool_name == "navigate_to_frontier" and self._navigate_fail_count >= 2:
+            tool_name = "play_action"
+            tool_args = {"action": self._find_alternative_action(location)}
+
         if tool_name != "play_action":
             return tool_name, tool_args
 
@@ -642,14 +732,22 @@ class StudentAgent:
         return tool_name, tool_args
 
     def _find_alternative_action(self, location: str) -> str:
+        """Find an untried direction, prioritizing known graph exits then unexplored dirs."""
         failed = self.memory.failed_actions.get(location, set())
-        for direction in ["exit", "down", "north", "south", "east", "west", "up", "enter",
-                          "northeast", "northwest", "southeast", "southwest"]:
+        known_exits = set(self.memory.location_graph.get(location, {}).keys())
+
+        # First: try directions confirmed to work (in graph) but not recently used
+        for direction in known_exits:
             if direction not in failed:
                 return direction
-        for fallback in ["look", "inventory"]:
-            if fallback not in failed:
-                return fallback
+
+        # Second: try standard directions in a smart order (south often = start)
+        for direction in ["south", "north", "east", "west", "up", "down",
+                          "enter", "exit", "northeast", "northwest", "southeast", "southwest"]:
+            if direction not in failed and direction not in known_exits:
+                return direction
+
+        # Last resort
         return "look"
 
     # -------------------------------------------------------------------------
