@@ -337,11 +337,11 @@ def suggest_actions() -> str:
     if found_objects:
         suggestions.append(f"Objects to examine: {', '.join(f'examine {o}' for o in found_objects[:5])}")
 
-    # 3. Inventory items that might be usable
+    # 4. Inventory tip
     inv_result = game.take_action("inventory")
     inv_obs = inv_result["observation"].lower()
     if "torch" in inv_obs or "lantern" in inv_obs or "lamp" in inv_obs:
-        if "turn on" not in examined:
+        if "turn on" not in truly_failed:
             suggestions.append("Tip: try 'turn on torch' or 'turn on lamp' if in dark area")
 
     if not suggestions:
