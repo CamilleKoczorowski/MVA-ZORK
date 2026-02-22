@@ -13,6 +13,7 @@ KEY FIX vs V9: valid_dirs from Jericho replaces blind sweep.
 In the Hole/junction, Jericho returns ["east","north","southeast","southwest"] — never south.
 """
 
+import asyncio
 import json
 import os
 import re
