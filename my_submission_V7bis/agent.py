@@ -977,7 +977,7 @@ class StudentAgent:
         return None
 
     def _parse_max_score(self, text: str) -> Optional[int]:
-        # Matches "Score: 1/350" or "5/350" patterns
+        # Matches "Score: 1/350" or cd .."5/350" patterns
         m = re.search(r'Score:\s*\d+\s*/\s*(\d+)', text, re.IGNORECASE)
         if m:
             return int(m.group(1))
